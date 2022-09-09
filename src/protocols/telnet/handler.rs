@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,6 +16,10 @@ use crate::{
 };
 
 use super::config::Config;
+
+const IAC: u8 = 255;
+const WONT: u8 = 252;
+const ECHO: u8 = 1;
 
 async fn login_prompt(
     config: Arc<Config>,
@@ -140,6 +144,16 @@ pub async fn handle(
 
     log.log("connected".to_owned());
 
+    // sending initial IAC values
+    let srv_iacs = vec![(ECHO, WONT)];
+    for (opt, cmd) in srv_iacs {
+        let buf = vec![IAC, cmd, opt];
+        if let Err(e) = socket.write_all(&buf).await {
+            error!("failed to send server IAC to {}; err = {:?}", address, e);
+            return;
+        }
+    }
+
     // while standard telnet clients will send a few bytes of protocol at the beginning
     // most malicious clients are simple tcp-connect clients, therefore they won't send
     // anything until a prompt is shown. Just wait for 300ms and continue wether we get
@@ -151,7 +165,7 @@ pub async fn handle(
         debug!("could not consume telnet first bytes from client: {}", e);
     }
 
-    // now use the configured timeout
+    // now use the configured timeout, we should be able to send data
     let rw_timeout = Duration::from_secs(config.timeout);
     if !config.banner.is_empty() {
         if let Err(e) = timeout(rw_timeout, socket.write_all(config.banner.as_bytes())).await {
@@ -166,16 +180,18 @@ pub async fn handle(
     let username = match login_prompt(config.clone(), &mut socket, address, rw_timeout).await {
         Ok(username) => username,
         Err(e) => {
-            error!("{}", e);
-            return;
+            // not fatal
+            warn!("{}", e);
+            None
         }
     };
 
     let password = match password_prompt(config.clone(), &mut socket, address, rw_timeout).await {
         Ok(password) => password,
         Err(e) => {
-            error!("{}", e);
-            return;
+            // not fatal
+            warn!("{}", e);
+            None
         }
     };
 
